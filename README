@@ -45,3 +45,7 @@ build.  The resulting '.so' file is the plugin, enjoy its deliciousness.
 == Contact ==
 Matt Davis (enferex)
 mattdavis9@gmail.com
+
+--------------------------
+Update by jluysf:
+new branch gcc9.3.0 to support gcc version 9.3.0.

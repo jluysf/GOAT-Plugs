@@ -26,16 +26,24 @@
  * along with GOAT-Plugs.  If not, see <http://www.gnu.org/licenses/>.
  *****************************************************************************/
 
+#include <time.h>
 #include <stdio.h>
-#include <coretypes.h>
 #include <gcc-plugin.h>
+#include <bitmap.h>
+#include <system.h>
+#include <coretypes.h>
+#include <tree.h>
 #include <gimple.h>
 #include <cgraph.h>
-#include <tree.h>
-#include <tree-flow.h>
 #include <tree-pass.h>
 #include <tree-iterator.h>
-
+#include <stringpool.h>
+#include <gimplify.h>
+#include <cgraph.h>
+#include <tree-vrp.h>
+#include <tree-ssanames.h>
+#include <tree-nested.h>
+#include <gimple-iterator.h>
 
 /* Special thanks to JPanic for schooling me on ideas and junk instructions */
 
@@ -73,16 +81,16 @@ static struct plugin_info slimer_info =
 /* How we test to ensure the gcc version will work with our plugin */
 static struct plugin_gcc_version nopper_ver =
 {
-    .basever = "4.6",
+    .basever = "9",
 };
 
 
 /* Func decl tree nodes, so we avoid processing a function multiple times */
-static VEC(tree,gc) *analyized_fns;
+static vec<tree> analyized_fns;
 
 
 /* List of tree decl nodes for all of junk functions we create */
-static VEC(tree,gc) *fakes = NULL;
+static vec<tree> fakes;
 
 
 /* Returns 'true' if we have already processed the function */
@@ -92,12 +100,12 @@ static bool has_been_processed(tree fndecl)
     tree decl;
 
     /* If we have already analyized it, then return true */
-    FOR_EACH_VEC_ELT(tree, analyized_fns, i, decl)
+    FOR_EACH_VEC_ELT(analyized_fns, i, decl)
       if (decl == fndecl)
         return true;
 
     /* If it's a junk function, return true */
-    FOR_EACH_VEC_ELT(tree, fakes, i, decl)
+    FOR_EACH_VEC_ELT(fakes, i, decl)
       if (decl == fndecl)
         return true;
 
@@ -123,6 +131,11 @@ static tree gen_junk(void)
     return stmts;
 }
 */
+
+static inline void cgraph_add_new_function(tree fndecl, bool lowerd)
+{
+    cgraph_node::add_new_function(fndecl, lowerd);
+}
 
 
 static tree build_junk_fn(unsigned id)
@@ -166,7 +179,6 @@ static tree build_junk_fn(unsigned id)
 
     /* Update */
     cgraph_add_new_function(decl, false);
-    cgraph_mark_needed_node(cgraph_node(decl));
     current_function_decl = NULL_TREE;
     pop_cfun();
 
@@ -174,9 +186,9 @@ static tree build_junk_fn(unsigned id)
 }
 
 
-static void insert_call(gimple stmt, tree decl)
+static void insert_call(gimple *stmt, tree decl)
 {
-    gimple call;
+    gimple *call;
     gimple_stmt_iterator gsi;
 
     /* Call the function */
@@ -185,7 +197,7 @@ static void insert_call(gimple stmt, tree decl)
     gsi_insert_before(&gsi, call, GSI_NEW_STMT);
 
     /* So we don't process this bad-boy */
-    VEC_safe_push(tree, gc, analyized_fns, decl);
+    analyized_fns.safe_push(decl);
 }
 
 
@@ -193,16 +205,17 @@ static void gen_fake_funcs(int n_funcs)
 {
     unsigned i;
 
-    fakes = VEC_alloc(tree, gc, 0);
     for (i=0; i<n_funcs; ++i)
-      VEC_safe_push(tree, gc, fakes, build_junk_fn(i));
+    {
+      fakes.safe_push(build_junk_fn(i));
+    } 
 }
 
 
-static void insert_call_to_junk_fn(gimple stmt)
+static void insert_call_to_junk_fn(gimple *stmt)
 {
     tree tv, rv, fn, rhs, tmp;
-    gimple gimp;
+    gimple *gimp;
     gimple_stmt_iterator gsi;
     static bool has_initted;
     static tree decl, proto, decl_get_funcs, proto_get_funcs, fn_ptr_type;
@@ -246,7 +259,7 @@ static void insert_call_to_junk_fn(gimple stmt)
     rv = create_tmp_var(uint64_type_node, "rv_tmp");
     rv = make_ssa_name(rv, NULL);
     rhs = build_int_cst(integer_type_node, n_funcs);
-    gimp = gimple_build_assign_with_ops(TRUNC_MOD_EXPR, rv, tv, rhs);
+    gimp = gimple_build_assign(rv, TRUNC_MOD_EXPR, tv, rhs);
     gsi_insert_before(&gsi, gimp, GSI_SAME_STMT);
 
     /* tmp = __slimer_get_funcs(); TODO: Get rid of __slimer_get_funcs()
@@ -265,12 +278,12 @@ static void insert_call_to_junk_fn(gimple stmt)
      * HAVE ADDRESS SIZES sizeof(void *)
      */
     tree addr_size = build_int_cst(integer_type_node, sizeof(void *));
-    gimp = gimple_build_assign_with_ops(MULT_EXPR, rv, rv, addr_size);
+    gimp = gimple_build_assign(rv, MULT_EXPR, rv, addr_size);
     gsi_insert_before(&gsi, gimp, GSI_SAME_STMT);
 
     fn = create_tmp_var(pp_type, "fn_tmp");
     fn = make_ssa_name(fn, NULL);
-    gimp = gimple_build_assign_with_ops(PLUS_EXPR, fn, tmp, rv);
+    gimp = gimple_build_assign(fn, PLUS_EXPR, tmp, rv);
     gsi_insert_before(&gsi, gimp, GSI_SAME_STMT);
 
     /* the_fn = *fn */
@@ -293,10 +306,10 @@ static void insert_call_to_junk_fn(gimple stmt)
 /* Insert a call to the runtime function "__slimer_add_fn" which will add the
  * "junk" function created at compile-time to an array at runtime
  */
-static void insert_add_fn(gimple stmt, int index)
+static void insert_add_fn(gimple *stmt, int index)
 {
     tree fn;
-    gimple call;
+    gimple *call;
     gimple_stmt_iterator gsi;
     static tree decl, proto, idx;
 
@@ -307,12 +320,12 @@ static void insert_add_fn(gimple stmt, int index)
         decl = build_fn_decl("__slimer_add_fn", proto);
     
         /* Add this fndecl to our list of things we do not process */
-        VEC_safe_push(tree, gc, analyized_fns, decl);
+        analyized_fns.safe_push(decl);
     }
 
     /* Create a constant value and pointer to the function we are to add */
     idx = build_int_cst(integer_type_node, index);
-    fn = build_addr(VEC_index(tree, fakes, index), NULL_TREE);
+    fn = build_addr(fakes[index]);
     call = gimple_build_call(decl, 2, fn, idx);
     gsi = gsi_for_stmt(stmt);
     gsi_insert_before(&gsi, call, GSI_NEW_STMT);
@@ -323,39 +336,39 @@ static void insert_add_fn(gimple stmt, int index)
 static void insert_slimer_init(void)
 {
     int i;
-    gimple stmt;
+    gimple *stmt;
     tree decl, proto;
 
     proto = build_function_type_list(void_type_node, integer_type_node, NULL_TREE);
     decl = build_fn_decl("__slimer_init", proto);
-    stmt = gsi_stmt(gsi_start_bb(ENTRY_BLOCK_PTR->next_bb));
+    stmt = gsi_stmt(gsi_start_bb(ENTRY_BLOCK_PTR_FOR_FN(cfun)->next_bb));
     insert_call(stmt, decl);
 
     for (i=0; i<n_funcs; ++i)
       insert_add_fn(stmt, i);
 
     /* Add this fndecl to our list of things we do not process */
-    VEC_safe_push(tree, gc, analyized_fns, decl);
+    analyized_fns.safe_push(decl);
 }
 
 
-static unsigned int slimer_exec(void)
+static unsigned int slimer_exec(function *fun)
 {
     basic_block bb;
-    gimple stmt;
+    gimple *stmt;
     gimple_stmt_iterator gsi;
 
-    if (has_been_processed(cfun->decl))
+    if (has_been_processed(fun->decl))
       return 0;
 
-    if (DECL_EXTERNAL(cfun->decl))
+    if (DECL_EXTERNAL(fun->decl))
       return 0;
 
-    if (get_identifier(get_name(cfun->decl)) == get_identifier("main"))
+    if (get_identifier(get_name(fun->decl)) == get_identifier("main"))
       insert_slimer_init();
 
     /* Go through the basic blocks of this function */
-    FOR_EACH_BB(bb)
+    FOR_EACH_BB_FN(bb, fun)
       for (gsi=gsi_start_bb(bb); !gsi_end_p(gsi); gsi_next(&gsi))
       {
           stmt = gsi_stmt(gsi);
@@ -377,7 +390,7 @@ static unsigned int slimer_exec(void)
       }
 
     /* Mark as being analyized so we avoid trying to junkify it again */
-    VEC_safe_push(tree, gc, analyized_fns, cfun->decl);
+    analyized_fns.safe_push(fun->decl);
     return 0;
 }
 
@@ -393,16 +406,27 @@ static bool slimer_gate(void)
     return true;
 }
 
-
-static struct gimple_opt_pass slimer_pass = 
+static pass_data pass_data_slimer = 
 {
-    .pass.type = GIMPLE_PASS,
-    .pass.name = "slimer",
-    .pass.gate = slimer_gate,
-    .pass.execute = slimer_exec,
-    .pass.todo_flags_finish = TODO_update_ssa|TODO_verify_ssa|TODO_cleanup_cfg,
+    .type = GIMPLE_PASS,
+    .name = "slimer",
+    .optinfo_flags = OPTGROUP_NONE,
+    .tv_id = TV_NONE,
+    .properties_required = 0,           /* Prop. required */
+    .properties_provided = 0,           /* Prop. provided */
+    .properties_destroyed = 0,           /* Prop destroyed */
+    .todo_flags_start = 0,           /* Flags start    */
+    .todo_flags_finish = TODO_update_ssa | TODO_cleanup_cfg
 };
 
+class pass_slimer : public gimple_opt_pass
+{
+    public:
+        pass_slimer() : gimple_opt_pass(pass_data_slimer, NULL) {;}
+        virtual unsigned int execute(function *fun) override {
+            return slimer_exec(fun);
+        }
+};
 
 /* Return 0 on success or error code on failure */
 int plugin_init(struct plugin_name_args   *info,
@@ -412,12 +436,12 @@ int plugin_init(struct plugin_name_args   *info,
     struct register_pass_info pass;
 
     /* Version check */
-    if (strncmp(ver->basever, nopper_ver.basever, strlen("4.6")))
+    if (strncmp(ver->basever, nopper_ver.basever, strlen(nopper_ver.basever)))
       return -1;
 
     srand(time(NULL));
 
-    pass.pass = &slimer_pass.pass;
+    pass.pass = new pass_slimer();
     pass.reference_pass_name = "ssa";
     pass.ref_pass_instance_number = 1;
     pass.pos_op = PASS_POS_INSERT_AFTER;

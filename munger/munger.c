@@ -84,6 +84,7 @@
 #include <gimple-ssa.h>
 #include <vec.h>
 #include <diagnostic.h>
+#include <tree-vrp.h>
 #include <tree-ssanames.h>
 
 
@@ -163,6 +164,16 @@ static tree get_str_cst(tree node)
     }
 }
 
+static inline void varpool_finalize_decl(tree decl)
+{
+	varpool_node::finalize_decl(decl);
+}
+
+static inline void varpool_add_new_variable(tree decl)
+{
+	varpool_node::add(decl);
+}
+
 
 /* Add 'node' to our vec of readonly vars */
 static tree add_unique(tree node)
@@ -180,7 +191,7 @@ static tree add_unique(tree node)
     DECL_NAME(dec_node) = create_tmp_var_name("MUNGER_GLOBAL");
     DECL_ARTIFICIAL(dec_node) = 1;
     TREE_STATIC(dec_node) = 1;
-    varpool_finalize_decl(dec_node);
+    varpool_add_new_variable(dec_node);
 
     /* Remember the node */
     ed = (encdec_t)xmalloc(sizeof(struct _encdec_d));
@@ -196,10 +207,10 @@ static tree add_unique(tree node)
  * Returns the lhs variable this function creates (decoded data).
  * This also sets the global
  */
-static tree insert_decode_bn(gimple stmt, tree lhs, tree arg)
+static tree insert_decode_bn(gimple *stmt, tree lhs, tree arg)
 {
     unsigned ii;
-    gimple call;
+    gimple *call;
     gimple_stmt_iterator gsi;
     encdec_t ed;
     tree str, size_node;
@@ -239,6 +250,8 @@ static void encode(tree node)
       if (ed->strcst == node)
         return;
 
+    printf("encode %s\n", TREE_STRING_POINTER(node));
+
     for (ii=0; ii<TREE_STRING_LENGTH(node); ++ii)
       ((char *)TREE_STRING_POINTER(node))[ii] =
         TREE_STRING_POINTER(node)[ii] ^ -1;
@@ -246,10 +259,10 @@ static void encode(tree node)
 
 
 /* Locate read only string constants */
-static void process_readonlys(gimple stmt)
+static void process_readonlys(gimple *stmt)
 {
     unsigned i;
-    gimple assign_global;
+    gimple *assign_global;
     gimple_stmt_iterator gsi;
     tree op, decoded_op, orig, decoded_var, lhs;
 
@@ -279,7 +292,7 @@ static void process_readonlys(gimple stmt)
         decoded_var = make_ssa_name(decoded_var, stmt);
 
         /* Assign the global to the ssa name instance */
-        assign_global = gimple_build_assign_stat(decoded_var, decoded_op);
+        assign_global = gimple_build_assign(decoded_var, decoded_op);
         gsi = gsi_for_stmt(stmt);
         gsi_insert_before(&gsi, assign_global, GSI_NEW_STMT);
 
@@ -295,16 +308,18 @@ static void process_readonlys(gimple stmt)
  * the pass struct defined below.
  * Returns 0 on success, error otherwise
  */
-static unsigned int munger_exec(void)
+static unsigned int munger_exec(function *fun)
 {
     basic_block bb;
     gimple_stmt_iterator gsi;
 
     init_builtins();
 
-    FOR_EACH_BB_FN(bb, cfun)
-      for (gsi=gsi_start_bb(bb); !gsi_end_p(gsi); gsi_next(&gsi))
-        process_readonlys(gsi_stmt(gsi));
+    FOR_EACH_BB_FN(bb, fun)
+      for (gsi=gsi_start_bb(bb); !gsi_end_p(gsi); gsi_next(&gsi)) {
+        gimple* stmt = gsi_stmt(gsi); 
+        process_readonlys(stmt);
+      }
 
 #ifdef GOAT_DEBUG
     debug_function(current_function_decl, 0);
@@ -317,11 +332,11 @@ static unsigned int munger_exec(void)
 /* Permit only gcc version 4.9 */
 static inline bool munger_version_check(const struct plugin_gcc_version *ver)
 {
-    if ((strncmp(ver->basever, "4.9", strlen("4.9")) == 0))
+    if ((strncmp(ver->basever, "9", strlen("9")) == 0))
       return true;
 
     error("[GOAT-Plugs] The munger plugin is not supported for this version of "
-          "the compiler, try a 4.9.x series");
+          "the compiler, try a 9.x series");
 
     return false;
 }
@@ -329,61 +344,64 @@ static inline bool munger_version_check(const struct plugin_gcc_version *ver)
 namespace {
 const pass_data pass_data_munger =
 {
-    GIMPLE_PASS, /* Type           */
-    "munger",    /* Name           */
-    0,           /* opt-info flags */
-    false,       /* Has gate       */
-    true,        /* Has exec       */
-    TV_NONE,     /* Time var id    */
-    0,           /* Prop. required */
-    0,           /* Prop. provided */
-    0,           /* Prop destroyed */
-    0,           /* Flags start    */
-    TODO_update_ssa | TODO_verify_ssa | TODO_cleanup_cfg /* Flags finish */
+    .type = GIMPLE_PASS, /* Type           */
+    .name = "munger",    /* Name           */
+    .optinfo_flags = OPTGROUP_NONE ,           /* opt-info flags */
+    .tv_id = TV_NONE,     /* Time var id    */
+    .properties_required = 0,           /* Prop. required */
+    .properties_provided = 0,           /* Prop. provided */
+    .properties_destroyed = 0,           /* Prop destroyed */
+    .todo_flags_start = 0,           /* Flags start    */
+    .todo_flags_finish = TODO_update_ssa | TODO_cleanup_cfg /* Flags finish */
 };
 
 class pass_munger : public gimple_opt_pass
 {
 public:
     pass_munger() : gimple_opt_pass(pass_data_munger, NULL) {;}
-    unsigned int execute() { return munger_exec(); }
+    virtual unsigned int execute(function *fun) override {
+        printf("%s\n", function_name(fun));
+        return munger_exec(fun);
+    }
 };
 } // Anonymous namespace
 
+/* Initalize the GIMPLE pass info */
+struct register_pass_info my_passinfo
+{
+    /* Get called after gcc has produced the SSA representation of the program.
+     * After the first SSA pass.
+     */
+    .pass = new pass_munger(),
+    .reference_pass_name = "ssa",
+    .ref_pass_instance_number = 1,
+    .pos_op = PASS_POS_INSERT_AFTER
+};
+
+static struct plugin_info my_munger_info
+{
+    /* Version info */
+    .version = "0.4",
+    .help = "Encodes readonly constant string data at compile "
+                       "time.  The string is then decoded automatically "
+                       "at runtime.",
+};
 
 /* Return 0 on success or error code on failure */
 int plugin_init(struct plugin_name_args   *info,  /* Argument info  */
                 struct plugin_gcc_version *ver)   /* Version of GCC */
 {
-    struct register_pass_info pass;
-    static struct plugin_info munger_info;
-
-    /* Version info */
-    munger_info.version = "0.4";
-    munger_info.help = "Encodes readonly constant string data at compile "
-                       "time.  The string is then decoded automatically "
-                       "at runtime.";
-
+    printf("plugin_init\n");
     if (!munger_version_check(ver))
       return -1; /* Incorrect version of gcc */
 
-    /* Initalize the GIMPLE pass info */
-
-    /* Get called after gcc has produced the SSA representation of the program.
-     * After the first SSA pass.
-     */
-    pass.pass = new pass_munger();
-    pass.reference_pass_name = "ssa";
-    pass.ref_pass_instance_number = 1;
-    pass.pos_op = PASS_POS_INSERT_AFTER;
-
     /* Tell gcc we want to be called after the first SSA pass */
-    register_callback("munger", PLUGIN_PASS_MANAGER_SETUP, NULL, &pass);
+    register_callback("munger", PLUGIN_PASS_MANAGER_SETUP, NULL, &my_passinfo);
 
     /* Tell gcc some information about us... just for use in --help and
      * --version
      */
-    register_callback("munger", PLUGIN_INFO, NULL, &munger_info);
+    register_callback("munger", PLUGIN_INFO, NULL, &my_munger_info);
 
     /* Successful initialization */ 
     return 0;

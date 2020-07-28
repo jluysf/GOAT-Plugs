@@ -66,14 +66,14 @@ static struct plugin_info nopper_info =
 /* How we test to ensure the gcc version will work with our plugin */
 static struct plugin_gcc_version nopper_ver =
 {
-    .basever = "4.9",
+    .basever = "9",
 };
 
 
 /* Insert a nop instruction before this statement */
 static void insert_nop(gimple_stmt_iterator gsi)
 {
-    gimple nop;
+    gimple *nop;
     nop = gimple_build_asm_vec("mov %%eax, %%eax", NULL, NULL, NULL, NULL);
     gsi_insert_before(&gsi, nop, GSI_NEW_STMT);
 }
@@ -131,7 +131,7 @@ static int count_stmts(void)
  * Returns 0 on success, error otherwise
  */
 static int n_nops; /* Global value for the number of nops to insert */
-static unsigned int nopper_exec(void)
+static unsigned int nopper_exec(function *fun)
 {
     int i;
     basic_block bb;
@@ -158,7 +158,7 @@ static unsigned int nopper_exec(void)
       return 0;;
 
     /* Get nopping! */
-    FOR_EACH_BB_FN(bb, cfun) 
+    FOR_EACH_BB_FN(bb, fun) 
       for (gsi=gsi_start_bb(bb); !gsi_end_p(gsi); gsi_next(&gsi))
         for (i=0; i<nops_per_stmt; ++i)
           insert_nop(gsi);
@@ -184,9 +184,9 @@ static const struct attribute_spec ignore_attr =
 {
     "nopper",
      0, 0, 
-     true, false, false, 
+     true, false, false, false,
      handle_ignore_attr,
-     false
+     NULL
 };
 
 
@@ -199,17 +199,15 @@ static void nopper_register_attrs(void *event_data, void *data)
 namespace{
 const pass_data pass_data_nopper =
 {
-    GIMPLE_PASS, /* Type           */
-    "nopper",    /* Name           */
-    0,           /* opt-info flags */
-    false,       /* Has gate       */
-    true,        /* Has exec       */
-    TV_NONE,     /* Time var id    */
-    0,           /* Prop. required */
-    0,           /* Prop. provided */
-    0,           /* Prop destroyed */
-    0,           /* Flags start    */
-    0            /* Flags finish   */
+    .type = GIMPLE_PASS, /* Type           */
+    .name = "nopper",    /* Name           */
+    .optinfo_flags = OPTGROUP_NONE,           /* opt-info flags */
+    .tv_id = TV_NONE,     /* Time var id    */
+    .properties_required = 0,           /* Prop. required */
+    .properties_provided = 0,           /* Prop. provided */
+    .properties_destroyed = 0,           /* Prop destroyed */
+    .todo_flags_start = 0,           /* Flags start    */
+    .todo_flags_finish = 0            /* Flags finish   */
 };
 
 
@@ -217,7 +215,7 @@ class pass_nopper : public gimple_opt_pass
 {
 public:
     pass_nopper() : gimple_opt_pass(pass_data_nopper, NULL) {;}
-    unsigned int execute() { return nopper_exec(); }
+    virtual unsigned int execute(function *fun) { return nopper_exec(fun); }
 };
 } /* Anonymous namespace */
 
@@ -237,7 +235,7 @@ int plugin_init(struct plugin_name_args   *info,  /* Argument info  */
      * we will skip that.  Instead, as mentioned it can be more useful if we
      * validate the version information ourselves
      */
-     if (strncmp(ver->basever, nopper_ver.basever, strlen("4.9")))
+     if (strncmp(ver->basever, nopper_ver.basever, strlen(nopper_ver.basever)))
        return -1; /* Incorrect version of gcc */
 
     /* Setup the info to register with gcc telling when we want to be called and

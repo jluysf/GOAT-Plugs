@@ -25,6 +25,10 @@
 
 #include <stdlib.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 static void **__funcs;
 
 
@@ -36,7 +40,7 @@ void *__slimer_get_funcs(void)
 
 void __slimer_init(int n_funcs)
 {
-    __funcs = calloc(1, sizeof(void *) * n_funcs);
+    __funcs = (void **)calloc(1, sizeof(void *) * n_funcs);
 }
 
 
@@ -44,3 +48,7 @@ void __slimer_add_fn(void *fn, int index)
 {
     __funcs[index] = fn;
 }
+
+#ifdef __cplusplus
+}
+#endif

@@ -41,9 +41,11 @@
 #include <gimple-ssa.h>
 #include <gimplify.h>
 #include <vec.h>
+#include <tree-vrp.h>
 #include <tree-ssanames.h>
 #include <time.h>
 
+#define ENABLE_JUNK_MATH 0
 
 /* Required for the plugin to work */
 int plugin_is_GPL_compatible = 1;
@@ -70,16 +72,18 @@ static struct plugin_info jpanic_info =
 /* How we test to ensure the gcc version will work with our plugin */
 static struct plugin_gcc_version jpanic_ver =
 {
-    .basever = "4.9",
+    .basever = "9",
 };
 
 
 typedef enum 
 {
     JUNK_ASSIGN,
+#if ENABLE_JUNK_MATH
     JUNK_ADD,
     JUNK_SUB,
     JUNK_MUL,
+#endif
     JUNK_NEW_FN, /* Create and call a new function */
     JUNK_OLD_FN, /* Call an existing function      */
     N_JUNK_TYPES
@@ -89,25 +93,35 @@ typedef enum
 /* Global vector of junk function decl nodes */
 vec<tree> junk_fns;
 
+static inline void varpool_finalize_decl(tree decl)
+{
+	varpool_node::finalize_decl(decl);
+}
+
+static inline void varpool_add_new_variable(tree decl)
+{
+	varpool_node::add(decl);
+}
 
 /* Global variable we set the left-hand-side of junk statements assign to.
  * This should prevent gcc from trying to remove the junk :-)
  */
-static tree jpanic;
+static tree jpanic = NULL_TREE;
 static void init_jpanic_global(void)
 {
     if (jpanic == NULL_TREE)
     {
         jpanic = build_decl(BUILTINS_LOCATION, VAR_DECL, NULL, integer_type_node);
-        jpanic = make_ssa_name(jpanic, gimple_build_nop());
+        //jpanic = make_ssa_name(jpanic, gimple_build_nop());
         DECL_NAME(jpanic) = create_tmp_var_name("__el_jpanic");
         TREE_STATIC(jpanic) = 1;
         DECL_ARTIFICIAL(jpanic) = 1;
+        varpool_add_new_variable(jpanic);
     }
 }
 
 
-static gimple build_junk_assign(void)
+static gimple *build_junk_assign(void)
 {
     tree rhs;
     rhs = create_tmp_var(integer_type_node, "_junk");
@@ -115,9 +129,14 @@ static gimple build_junk_assign(void)
     return gimple_build_assign(jpanic, rhs);
 }
 
+static inline void cgraph_add_new_function(tree fndecl, bool lowerd)
+{
+    cgraph_node::add_new_function(fndecl, lowerd);
+}
 
+#if ENABLE_JUNK_MATH
 /* lhs = rhs1 OP rhs2 */
-static gimple build_junk_math(junk_type_e op)
+static gimple *build_junk_math(junk_type_e op)
 {
     tree rhs1, rhs2;
     enum tree_code code;
@@ -130,20 +149,22 @@ static gimple build_junk_math(junk_type_e op)
       code = MULT_EXPR;
 
     rhs1 = create_tmp_var(integer_type_node, "_junk");
-    rhs1 = make_ssa_name(rhs1, gimple_build_nop());
+    rhs1 = make_ssa_name(rhs1, gimple_build_nop());	// TODO: this cause internal error
+     
     DECL_ARTIFICIAL(rhs1) = 1;
     TREE_THIS_VOLATILE(rhs1) = 1;
     DECL_PRESERVE_P(rhs1) = 1;
 
     rhs2 = create_tmp_var(integer_type_node, "_junk");
-    rhs2 = make_ssa_name(rhs2, gimple_build_nop());
+    rhs2 = make_ssa_name(rhs2, gimple_build_nop());	// TODO: this cause internal error
     DECL_ARTIFICIAL(rhs2) = 1;
     TREE_THIS_VOLATILE(rhs2) = 1;
     DECL_PRESERVE_P(rhs2) = 1;
 
-    return gimple_build_assign_with_ops(code, jpanic, rhs1, rhs2);
+    //return gimple_build_assign(code, jpanic, rhs1, rhs2);
+    return gimple_build_assign(jpanic, code, rhs1, rhs2);
 }
-
+#endif
 
 /* Creates an empty function */
 static tree create_junk_fn(void)
@@ -226,10 +247,10 @@ static bool is_junk_fn(tree decl)
 /* Craete a NOP (junk) instruction statement. 
  * Returns the junk statement created
  */
-static gimple create_junk_stmt(void)
+static gimple *create_junk_stmt(void)
 {
     tree node;
-    gimple stmt;
+    gimple *stmt;
     junk_type_e junk_type;
 
     /* Choose a thing to insert */
@@ -239,13 +260,14 @@ static gimple create_junk_stmt(void)
         case JUNK_ASSIGN:
             stmt = build_junk_assign();
             break;
-        
+#if ENABLE_JUNK_MATH
         case JUNK_ADD:
         case JUNK_SUB:
         case JUNK_MUL:
+            printf("junk math\n");
             stmt = build_junk_math(junk_type);
             break;
-        
+#endif
         case JUNK_NEW_FN:
             /* Do not add a call to a junk function if we are one */
             if (!is_junk_fn(cfun->decl))
@@ -267,7 +289,6 @@ static gimple create_junk_stmt(void)
             else
               stmt = gimple_build_nop();
             break;
-
         default:
             abort();
     }
@@ -277,10 +298,10 @@ static gimple create_junk_stmt(void)
 
 
 /* Called once per function */
-static unsigned int jpanic_exec(void)
+static unsigned int jpanic_exec(function *fun)
 {
     basic_block bb;
-    gimple stmt;
+    gimple *stmt;
     gimple_stmt_iterator gsi;
     static bool initted;
 
@@ -290,10 +311,12 @@ static unsigned int jpanic_exec(void)
         initted = true;
     }
 
+    printf("jpanic %s\n", function_name(fun));
+
     /* For each basic block ... for each statement ... if rand is true insert
      * junk before the statement
      */
-    FOR_EACH_BB_FN(bb, cfun)
+    FOR_EACH_BB_FN(bb, fun)
       for (gsi=gsi_start_bb(bb); !gsi_end_p(gsi); gsi_next(&gsi))
         if ((max_junk > 0) && (rand() % 2 && max_junk))
         {
@@ -305,10 +328,10 @@ static unsigned int jpanic_exec(void)
              * variable so that we make the junk actually get compiled in.  GCC
              * is smart and doesn't want to compile in junk.
              */
-            if (is_junk_fn(cfun->decl))
+            if (is_junk_fn(fun->decl))
             {
-                gsi_insert_before(&gsi, gimple_build_assign(DECL_RESULT(cfun->decl),
-                            jpanic), GSI_NEW_STMT);
+                gsi_insert_before(&gsi, gimple_build_assign(jpanic,
+                            DECL_RESULT(cfun->decl)), GSI_NEW_STMT);
             }
             --max_junk;
         }
@@ -324,17 +347,15 @@ static unsigned int jpanic_exec(void)
 namespace{
 const pass_data pass_data_jpanic =
 {
-    GIMPLE_PASS, /* Type           */
-    "jpanic",    /* Name           */
-    0,           /* opt-info flags */
-    false,       /* Has gate       */
-    true,        /* Has exec       */
-    TV_NONE,     /* Time var id    */
-    0,           /* Prop. required */
-    0,           /* Prop. provided */
-    0,           /* Prop destroyed */
-    0,           /* Flags start    */
-    0            /* Flags finish   */
+    .type = GIMPLE_PASS, /* Type           */
+    .name = "jpanic",    /* Name           */
+    .optinfo_flags = OPTGROUP_NONE,           /* opt-info flags */
+    .tv_id = TV_NONE,     /* Time var id    */
+    .properties_required = 0,           /* Prop. required */
+    .properties_provided = 0,           /* Prop. provided */
+    .properties_destroyed = 0,           /* Prop destroyed */
+    .todo_flags_start = 0,           /* Flags start    */
+    .todo_flags_finish = 0            /* Flags finish   */
 };
 
 
@@ -342,31 +363,33 @@ class pass_jpanic : public gimple_opt_pass
 {
 public:
     pass_jpanic() : gimple_opt_pass(pass_data_jpanic, NULL) {;}
-    unsigned int execute() { return jpanic_exec(); }
+    virtual unsigned int execute(function *fun) override { return jpanic_exec(fun); }
 };
 } /* Anonymous namespace */
 
+struct register_pass_info my_passinfo
+{
+
+    /* Setup the info to register with gcc telling when we want to be called and
+     * to what gcc should call, when it's time to be called.
+     */
+    .pass = new pass_jpanic(),
+    .reference_pass_name = "ssa",
+    .ref_pass_instance_number = 1,
+    .pos_op = PASS_POS_INSERT_AFTER
+};
 
 /* Return 0 on success or error code on failure */
 int plugin_init(struct plugin_name_args   *info,  /* Argument info  */
                 struct plugin_gcc_version *ver)   /* Version of GCC */
 {
     int i;
-    struct register_pass_info pass;
 
     /* Check version */
-    if (strncmp(ver->basever, jpanic_ver.basever, strlen("4.9")))
+    if (strncmp(ver->basever, jpanic_ver.basever, strlen(jpanic_ver.basever)))
       return -1;
 
-    /* Setup the info to register with gcc telling when we want to be called and
-     * to what gcc should call, when it's time to be called.
-     */
-    pass.pass = new pass_jpanic();
-    pass.reference_pass_name = "ssa";
-    pass.ref_pass_instance_number = 1;
-    pass.pos_op = PASS_POS_INSERT_AFTER;
-
-    register_callback("jpanic", PLUGIN_PASS_MANAGER_SETUP, NULL, &pass);
+    register_callback("jpanic", PLUGIN_PASS_MANAGER_SETUP, NULL, &my_passinfo);
     register_callback("jpanic", PLUGIN_INFO, NULL, &jpanic_info);
 
     /* Seed the rng */

